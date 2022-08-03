@@ -1,14 +1,13 @@
-from typing import Union, List, Any
+from typing import Any, List, Union
 
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
 from colossalai.engine import Engine
 from colossalai.logging import DistributedLogger
-from colossalai.utils import MultiTimer
-from colossalai.utils import is_dp_rank_0, is_tp_rank_0, is_no_pp_or_last_stage
 from colossalai.trainer.hooks import BaseHook
+from colossalai.utils import (MultiTimer, is_dp_rank_0, is_no_pp_or_last_stage,
+                              is_tp_rank_0)
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 class Trainer:
@@ -184,6 +183,54 @@ class Trainer:
                 return_loss=True,
                 return_output_label=return_output_label,
             )
+            
+            #############################################
+            #### CALCULATE LAYER NORM FOR EACH LAYER ####
+            #############################################
+            
+            # # Pengrui's layer_norm (all mixed together..)
+            # layer_norm = np.zeros(len(self.engine._model.blocks)+2)
+            # for layer_i in range(len(layer_norm)):
+            #     _grad_norm = 0.
+            #     if layer_i == 0:
+            #         cur_block = self.engine._model.embed 
+            #     elif layer_i == len(layer_norm) - 1:
+            #         cur_block = self.engine._model.head 
+            #     else:
+            #         cur_block = self.engine._model.blocks[layer_i - 1]
+
+            #     for name, param in cur_block.named_parameters():
+            #         _grad_norm += (param.grad.norm().item())**2
+            #     layer_norm[layer_i] += _grad_norm
+            
+
+            # declare vars
+            self.engine._model.embed_layer_norm = np.zeros(1)
+            self.engine._model.head_layer_norm = np.zeros(1)
+            self.engine._model.decoder_layer_norm = np.zeros(len(self.engine._model.blocks))
+            
+            # (1/3) embed layer
+            _grad_norm_embed = 0.
+            for name, param in self.engine._model.embed.named_parameters():
+                _grad_norm_embed += (param.grad.norm().item())**2
+            self.engine._model.embed_layer_norm += _grad_norm_embed
+            
+            # (2/3) head layer
+            _grad_norm_head = 0.
+            for name, param in self.engine._model.head.named_parameters():
+                _grad_norm_head += (param.grad.norm().item())**2
+            self.engine._model.head_layer_norm += _grad_norm_head
+            
+            # (3/3) decoder (GPT_Blocks) layers
+            for itr, curr_decoder_block in enumerate(self.engine._model.blocks):
+                _grad_norm_decoder = 0.
+                for name, param in curr_decoder_block.named_parameters():
+                    _grad_norm_decoder += (param.grad.norm().item())**2
+                self.engine._model.decoder_layer_norm[itr] += _grad_norm_decoder
+            
+            
+            
+            
             self.engine.step()
             self._call_timer(action="stop", item="Train-step", keep_in_history=True)
             self._call_hooks("after_train_iter", output=(logits, label, loss))
